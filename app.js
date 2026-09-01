@@ -28,8 +28,8 @@
   ];
 
   /* ---------------- State ---------------- */
-  let weeksIndex = [];        // [{key,label,mondayISO}]
-  let weekCache = {};         // key -> {label, lectures, attendance}
+  let weeksIndex = [];        // [{key,label,mondayISO,closed}] — derived from Firebase snapshot
+  let weekCache = {};         // key -> {label, lectures, attendance, closed}
   let currentWeekKey = null;
   let currentView = 'week';   // 'week' | 'summary'
   let summaryData = null;     // computed lazily
@@ -37,54 +37,86 @@
   const mainEl = document.getElementById('main');
   const toolbarEl = document.getElementById('toolbarInner');
   const fileInput = document.getElementById('fileInput');
+  const mastheadActionsEl = document.getElementById('mastheadActions');
 
-  /* ---------------- Storage layer ----------------
-     Plain browser localStorage, so the journal survives page reloads and
-     works the same whether this is opened from disk, from a USB stick, or
-     hosted anywhere — no account or server needed. It lives in THIS browser
-     on THIS device only, which is exactly why the Excel export exists: it's
-     your portable backup and the thing you actually hand to the deanery. */
-  const STORE_PREFIX = 'starosta_journal_v1:';
+  /* ---------------- Firebase config ----------------
+     Журнал синхронізується через Firebase Realtime Database — так відмітки,
+     зроблені з телефону чи з комп'ютера, з'являються одночасно на всіх
+     пристроях. Щоб увімкнути це:
 
-  function storageGet(key){
-    try{
-      const raw = localStorage.getItem(STORE_PREFIX + key);
-      return raw === null ? null : raw;
-    }catch(e){ console.error('storage get failed', e); return null; }
-  }
-  function storageSet(key, value){
-    try{
-      localStorage.setItem(STORE_PREFIX + key, value);
-      return true;
-    }catch(e){ console.error('storage set failed (is localStorage full or disabled?)', e); return false; }
-  }
-  function storageDelete(key){
-    try{ localStorage.removeItem(STORE_PREFIX + key); }catch(e){}
-  }
+     1. Зайди на https://console.firebase.google.com і створи проєкт (безкоштовно).
+     2. Зліва: Build → Realtime Database → Create Database (регіон і режим
+        не важливі — правила нижче все одно перепишуть доступ).
+     3. Зліва: Build → Authentication → вкладка Sign-in method → увімкни
+        "Email/Password".
+     4. Там же, вкладка Users → Add user → введи свій email і пароль.
+        Це буде єдиний акаунт для входу в журнал (можна додати ще людей так само).
+     5. Тиснемо на шестерню зверху → Project settings → внизу розділу
+        "Your apps" тисни "</>" (Web) → зареєструй застосунок → скопіюй
+        об'єкт firebaseConfig, який покажуть, і встав його нижче замість
+        значень-заглушок.
+     6. Realtime Database → вкладка Rules → встав:
+          {
+            "rules": {
+              "journal_pi267": {
+                ".read": "auth != null",
+                ".write": "auth != null"
+              }
+            }
+          }
+        і натисни Publish. Це закриває дані від сторонніх — читати й писати
+        може лише той, хто увійшов через акаунт з кроку 4.
+  */
+  const firebaseConfig = {
+    apiKey: "ВСТАВ_СЮДИ",
+    authDomain: "ВСТАВ_СЮДИ",
+    databaseURL: "ВСТАВ_СЮДИ",
+    projectId: "ВСТАВ_СЮДИ",
+    storageBucket: "ВСТАВ_СЮДИ",
+    messagingSenderId: "ВСТАВ_СЮДИ",
+    appId: "ВСТАВ_СЮДИ"
+  };
+  const DB_PATH = 'journal_pi267';
 
-  function loadWeeksIndex(){
-    const raw = storageGet('weeks_index');
-    weeksIndex = raw ? JSON.parse(raw) : [];
-    weeksIndex.sort((a,b)=> a.mondayISO < b.mondayISO ? 1 : -1); // newest first
-  }
-  function saveWeeksIndex(){
-    storageSet('weeks_index', JSON.stringify(weeksIndex));
-  }
-  function loadWeek(key){
-    if(weekCache[key]) return weekCache[key];
-    const raw = storageGet('week_' + key);
-    if(!raw) return null;
-    const data = JSON.parse(raw);
-    weekCache[key] = data;
-    return data;
-  }
-  function saveWeek(key, data){
-    weekCache[key] = data;
-    storageSet('week_' + key, JSON.stringify(data));
+  function configIsFilled(){
+    return !!firebaseConfig.apiKey && firebaseConfig.apiKey.indexOf('ВСТАВ_СЮДИ') === -1;
   }
 
+  let auth = null;
+  let db = null;
+  let weeksRef = null;
+  let weeksListener = null;
+
+  /* ---------------- Attendance key helper ----------------
+     Firebase Realtime Database silently turns an object whose keys look
+     like sequential array indices ("0","1","2"...) into an actual array.
+     Student indexes are exactly that, so every attendance key gets an "s"
+     prefix to keep it a normal object on both write and read. */
+  function skey(idx){ return 's' + idx; }
+
+  /* ---------------- Sync layer (Firebase Realtime Database) ---------------- */
   function sortedWeeksAsc(){
     return weeksIndex.slice().sort((a,b)=> a.mondayISO < b.mondayISO ? -1 : 1);
+  }
+
+  function loadWeek(key){
+    return weekCache[key] || null;
+  }
+
+  function saveWeek(key, data){
+    weekCache[key] = data; // optimistic local update; the listener confirms it moments later
+    if(!db) return;
+    db.ref(DB_PATH + '/' + key).set(data).catch(err=>{
+      showToast('Не вдалося зберегти: ' + err.message);
+    });
+  }
+
+  function deleteWeekRemote(key){
+    delete weekCache[key];
+    if(!db) return;
+    db.ref(DB_PATH + '/' + key).remove().catch(err=>{
+      showToast('Не вдалося видалити: ' + err.message);
+    });
   }
 
   function setWeekClosed(key, closed){
@@ -93,7 +125,87 @@
     week.closed = closed;
     saveWeek(key, week);
     const idxEntry = weeksIndex.find(w=>w.key===key);
-    if(idxEntry){ idxEntry.closed = closed; saveWeeksIndex(); }
+    if(idxEntry) idxEntry.closed = closed;
+  }
+
+  function startSync(){
+    if(weeksListener) return;
+    weeksRef = db.ref(DB_PATH);
+    weeksListener = weeksRef.on('value', snapshot=>{
+      const weeksObj = snapshot.val() || {};
+      weekCache = {};
+      weeksIndex = Object.keys(weeksObj).map(key=>{
+        const w = weeksObj[key];
+        weekCache[key] = w;
+        return { key, label: w.label, mondayISO: w.mondayISO, closed: !!w.closed };
+      });
+      weeksIndex.sort((a,b)=> a.mondayISO < b.mondayISO ? 1 : -1); // newest first
+      summaryData = null;
+      renderAll();
+    }, err=>{
+      showToast('Помилка синхронізації: ' + err.message);
+    });
+  }
+
+  function stopSync(){
+    if(weeksRef && weeksListener){ weeksRef.off('value', weeksListener); }
+    weeksRef = null;
+    weeksListener = null;
+    weeksIndex = [];
+    weekCache = {};
+    currentWeekKey = null;
+  }
+
+  /* ---------------- Auth ---------------- */
+  function renderSetupNeeded(){
+    toolbarEl.innerHTML = '';
+    mainEl.innerHTML = `
+      <div class="login-box">
+        <h2>Синхронізацію ще не налаштовано</h2>
+        <p>У файлі app.js потрібно вписати дані свого Firebase-проєкту (об'єкт firebaseConfig на початку файлу) — короткі кроки описані прямо там у коментарі. Це займає кілька хвилин і робиться один раз.</p>
+      </div>`;
+  }
+
+  function renderLogin(errorMsg){
+    toolbarEl.innerHTML = '';
+    if(mastheadActionsEl) mastheadActionsEl.innerHTML = '';
+    mainEl.innerHTML = `
+      <div class="login-box">
+        <h2>Вхід у журнал</h2>
+        <p>Дані синхронізуються між усіма пристроями. Увійди акаунтом, який ти створив у Firebase.</p>
+        ${errorMsg ? `<div class="login-error">${escapeHtml(errorMsg)}</div>` : ''}
+        <input type="email" id="loginEmail" placeholder="Email" autocomplete="username">
+        <input type="password" id="loginPass" placeholder="Пароль" autocomplete="current-password">
+        <button class="btn-primary" id="loginBtn" style="width:100%;">Увійти</button>
+      </div>`;
+    const doLogin = ()=>{
+      const email = document.getElementById('loginEmail').value.trim();
+      const pass = document.getElementById('loginPass').value;
+      if(!email || !pass) return;
+      auth.signInWithEmailAndPassword(email, pass).catch(err=> renderLogin(translateAuthError(err)));
+    };
+    document.getElementById('loginBtn').addEventListener('click', doLogin);
+    document.getElementById('loginPass').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+  }
+
+  function translateAuthError(err){
+    const map = {
+      'auth/invalid-email': 'Некоректний email.',
+      'auth/user-not-found': 'Такого користувача немає.',
+      'auth/wrong-password': 'Невірний пароль.',
+      'auth/invalid-credential': 'Невірний email або пароль.',
+      'auth/too-many-requests': 'Забагато спроб. Спробуй трохи пізніше.'
+    };
+    return map[err.code] || ('Помилка входу: ' + err.message);
+  }
+
+  function renderSignedInBadge(){
+    if(!mastheadActionsEl) return;
+    const email = auth.currentUser ? auth.currentUser.email : '';
+    mastheadActionsEl.innerHTML = `
+      <span class="signed-in-as">${escapeHtml(email)}</span>
+      <button class="ghost-btn" id="signOutBtn">вийти</button>`;
+    document.getElementById('signOutBtn').addEventListener('click', ()=> auth.signOut());
   }
 
   /* ---------------- Schedule file parsing ---------------- */
@@ -196,8 +308,8 @@
     const week = loadWeek(weekKey);
     if(!week.attendance) week.attendance = {};
     if(!week.attendance[lectureId]) week.attendance[lectureId] = {};
-    if(state === 0){ delete week.attendance[lectureId][studentIdx]; }
-    else{ week.attendance[lectureId][studentIdx] = state; }
+    if(state === 0){ delete week.attendance[lectureId][skey(studentIdx)]; }
+    else{ week.attendance[lectureId][skey(studentIdx)] = state; }
     saveWeek(weekKey, week);
     summaryData = null;
   }
@@ -206,7 +318,7 @@
     const week = loadWeek(weekKey);
     if(!week.attendance) week.attendance = {};
     const m = {};
-    STUDENTS.forEach((s,i)=> m[i] = 1);
+    STUDENTS.forEach((s,i)=> m[skey(i)] = 1);
     week.attendance[lectureId] = m;
     saveWeek(weekKey, week);
     summaryData = null;
@@ -289,7 +401,7 @@
       let rowAbs = 0;
       let cellsHtml = '';
       week.lectures.forEach(l=>{
-        const st = (attendance[l.id] && attendance[l.id][idx]) || 0;
+        const st = (attendance[l.id] && attendance[l.id][skey(idx)]) || 0;
         if(st===2) rowAbs++;
         cellsHtml += `<td class="cell-attend${locked?' locked':''}" data-lecture="${l.id}" data-student="${idx}"><div class="mark state-${st}"></div></td>`;
       });
@@ -304,7 +416,7 @@
     week.lectures.forEach(l=>{
       let present=0;
       STUDENTS.forEach((_,idx)=>{
-        const st = (attendance[l.id] && attendance[l.id][idx]) || 0;
+        const st = (attendance[l.id] && attendance[l.id][skey(idx)]) || 0;
         if(st===1) present++;
       });
       footHtml += `<td>${present}/${STUDENTS.length}</td>`;
@@ -400,13 +512,11 @@
     document.getElementById('deleteWeekBtn').addEventListener('click', ()=>{
       showModal({
         title: 'Видалити тиждень?',
-        text: `Тиждень ${week.label} та всі відмітки в ньому буде видалено безповоротно.`,
+        text: `Тиждень ${week.label} та всі відмітки в ньому буде видалено безповоротно на всіх пристроях.`,
         confirmLabel: 'Видалити', danger:true,
         onConfirm: ()=>{
-          storageDelete('week_' + currentWeekKey);
-          delete weekCache[currentWeekKey];
+          deleteWeekRemote(currentWeekKey);
           weeksIndex = weeksIndex.filter(w=>w.key!==currentWeekKey);
-          saveWeeksIndex();
           currentWeekKey = weeksIndex.length ? weeksIndex[0].key : null;
           renderAll();
         }
@@ -425,7 +535,7 @@
       week.lectures.forEach(l=>{
         STUDENTS.forEach((_,idx)=>{
           rows[idx].totalLectures++;
-          const st = (att[l.id] && att[l.id][idx]) || 0;
+          const st = (att[l.id] && att[l.id][skey(idx)]) || 0;
           if(st===2) rows[idx].absences++;
           else if(st===1) rows[idx].present++;
         });
@@ -497,7 +607,7 @@
     const dataRows = STUDENTS.map((stu, idx)=>{
       let abs = 0;
       const marks = week.lectures.map(l=>{
-        const st = (attendance[l.id] && attendance[l.id][idx]) || 0;
+        const st = (attendance[l.id] && attendance[l.id][skey(idx)]) || 0;
         if(st===2){ abs++; return 'н'; }
         return '';
       });
@@ -688,7 +798,6 @@
       existingEntry.label = parsed.label;
       existingEntry.closed = closed;
     }
-    saveWeeksIndex();
     summaryData = null;
     currentView = 'week';
     currentWeekKey = parsed.key;
@@ -709,8 +818,22 @@
   }
 
   /* ---------------- Init ---------------- */
-  loadWeeksIndex();
-  if(weeksIndex.length) currentWeekKey = weeksIndex[0].key;
-  renderAll();
+  if(!configIsFilled()){
+    renderSetupNeeded();
+  } else {
+    firebase.initializeApp(firebaseConfig);
+    auth = firebase.auth();
+    db = firebase.database();
+
+    auth.onAuthStateChanged(user=>{
+      if(user){
+        renderSignedInBadge();
+        startSync();
+      } else {
+        stopSync();
+        renderLogin();
+      }
+    });
+  }
 
 })();
