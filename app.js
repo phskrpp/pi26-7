@@ -33,6 +33,9 @@
   let currentWeekKey = null;
   let currentView = 'week';   // 'week' | 'summary'
   let summaryData = null;     // computed lazily
+  let userRole = null;        // 'editor' | 'viewer' — loaded from roles/{uid} right after login
+
+  function canEdit(){ return userRole === 'editor'; }
 
   const mainEl = document.getElementById('main');
   const toolbarEl = document.getElementById('toolbarInner');
@@ -42,15 +45,19 @@
   /* ---------------- Firebase config ----------------
      Журнал синхронізується через Firebase Realtime Database — так відмітки,
      зроблені з телефону чи з комп'ютера, з'являються одночасно на всіх
-     пристроях. Щоб увімкнути це:
+     пристроях. Читати журнал (розклад, відмітки, зведення) може будь-хто
+     за посиланням — БЕЗ входу. Вхід потрібен лише тобі, щоб отримати право
+     редагувати. Куратору окремий акаунт не потрібен — він просто відкриває
+     сторінку. Щоб увімкнути це:
 
      1. Зайди на https://console.firebase.google.com і створи проєкт (безкоштовно).
      2. Зліва: Build → Realtime Database → Create Database (регіон і режим
         не важливі — правила нижче все одно перепишуть доступ).
      3. Зліва: Build → Authentication → вкладка Sign-in method → увімкни
         "Email/Password".
-     4. Там же, вкладка Users → Add user → введи свій email і пароль.
-        Це буде єдиний акаунт для входу в журнал (можна додати ще людей так само).
+     4. Там же, вкладка Users → Add user → введи СВІЙ email і пароль (це
+        єдиний акаунт, потрібний лише для редагування; можеш додати ще
+        людей так само, якщо редагувати мають кілька осіб).
      5. Тиснемо на шестерню зверху → Project settings → внизу розділу
         "Your apps" тисни "</>" (Web) → зареєструй застосунок → скопіюй
         об'єкт firebaseConfig, який покажуть, і встав його нижче замість
@@ -59,13 +66,33 @@
           {
             "rules": {
               "journal_pi267": {
+                ".read": true,
+                ".write": "auth != null && root.child('roles').child(auth.uid).val() === 'editor'"
+              },
+              "roles": {
                 ".read": "auth != null",
-                ".write": "auth != null"
+                ".write": false
               }
             }
           }
-        і натисни Publish. Це закриває дані від сторонніх — читати й писати
-        може лише той, хто увійшов через акаунт з кроку 4.
+        і натисни Publish. Так читати журнал може будь-хто за посиланням
+        (навіть без входу), а писати (ставити відмітки, завантажувати
+        тижні і т.д.) — лише той, хто увійшов і чий UID позначений як
+        "editor" в гілці roles.
+
+        ВАЖЛИВО: ".read": true означає, що журнал (імена студентів,
+        відвідуваність) публічно доступний будь-кому, хто знає посилання
+        на сайт — так само, як зараз доступний сам сайт на GitHub Pages.
+        Якщо це небажано, посилання на сайт варто не поширювати публічно.
+     7. Прив'яжи собі роль редактора: Authentication → вкладка Users →
+        скопіюй User UID свого акаунта (з кроку 4). Потім Realtime Database
+        → вкладка Data → на корені бази (поруч із journal_pi267) додай
+        вузол "roles", а в ньому дочірній ключ = UID свого акаунта,
+        значення — рядок "editor".
+     8. Готово. Куратор просто відкриває посилання на сайт і бачить журнал
+        без кнопки "увійти" в дії — все в режимі перегляду. Ти тиснеш
+        "увійти" у шапці сайту, вводиш email/пароль з кроку 4 — і з'являються
+        кнопки редагування.
   */
   const firebaseConfig = {
     apiKey: "AIzaSyAqj1dBvByK6Vwnz0nEaHyHVyKY8h1pIvU",
@@ -77,6 +104,7 @@
     appId: "1:788681929939:web:14eab5dadaed91d4cb9026"
   };
   const DB_PATH = 'journal_pi267';
+  const ROLES_PATH = 'roles';
 
   function configIsFilled(){
     return !!firebaseConfig.apiKey && firebaseConfig.apiKey.indexOf('ВСТАВ_СЮДИ') === -1;
@@ -166,28 +194,6 @@
       </div>`;
   }
 
-  function renderLogin(errorMsg){
-    toolbarEl.innerHTML = '';
-    if(mastheadActionsEl) mastheadActionsEl.innerHTML = '';
-    mainEl.innerHTML = `
-      <div class="login-box">
-        <h2>Вхід у журнал</h2>
-        <p>Дані синхронізуються між усіма пристроями. Увійди акаунтом, який ти створив у Firebase.</p>
-        ${errorMsg ? `<div class="login-error">${escapeHtml(errorMsg)}</div>` : ''}
-        <input type="email" id="loginEmail" placeholder="Email" autocomplete="username">
-        <input type="password" id="loginPass" placeholder="Пароль" autocomplete="current-password">
-        <button class="btn-primary" id="loginBtn" style="width:100%;">Увійти</button>
-      </div>`;
-    const doLogin = ()=>{
-      const email = document.getElementById('loginEmail').value.trim();
-      const pass = document.getElementById('loginPass').value;
-      if(!email || !pass) return;
-      auth.signInWithEmailAndPassword(email, pass).catch(err=> renderLogin(translateAuthError(err)));
-    };
-    document.getElementById('loginBtn').addEventListener('click', doLogin);
-    document.getElementById('loginPass').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
-  }
-
   function translateAuthError(err){
     const map = {
       'auth/invalid-email': 'Некоректний email.',
@@ -199,13 +205,61 @@
     return map[err.code] || ('Помилка входу: ' + err.message);
   }
 
-  function renderSignedInBadge(){
+  // Журнал відкритий для перегляду будь-кому за посиланням — вхід потрібен
+  // лише щоб отримати право редагувати (ставити відмітки, керувати тижнями).
+  function renderAuthBadge(){
     if(!mastheadActionsEl) return;
-    const email = auth.currentUser ? auth.currentUser.email : '';
-    mastheadActionsEl.innerHTML = `
-      <span class="signed-in-as">${escapeHtml(email)}</span>
-      <button class="ghost-btn" id="signOutBtn">вийти</button>`;
-    document.getElementById('signOutBtn').addEventListener('click', ()=> auth.signOut());
+    if(auth.currentUser){
+      const email = auth.currentUser.email;
+      const roleTag = canEdit()
+        ? '<span class="role-tag role-editor">редактор</span>'
+        : '<span class="role-tag role-viewer">перегляд</span>';
+      mastheadActionsEl.innerHTML = `
+        <span class="signed-in-as">${escapeHtml(email)}</span>
+        ${roleTag}
+        <button class="ghost-btn" id="signOutBtn">вийти</button>`;
+      document.getElementById('signOutBtn').addEventListener('click', ()=> auth.signOut());
+    } else {
+      mastheadActionsEl.innerHTML = `
+        <span class="role-tag role-viewer">перегляд</span>
+        <button class="ghost-btn" id="loginOpenBtn">увійти</button>`;
+      document.getElementById('loginOpenBtn').addEventListener('click', showLoginModal);
+    }
+  }
+
+  function showLoginModal(){
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `
+      <div class="modal">
+        <h3>Вхід для редагування</h3>
+        <p>Журнал відкритий для перегляду без входу. Увійди акаунтом редактора, щоб ставити відмітки й керувати тижнями.</p>
+        <div id="loginErrorBox" class="login-error" style="display:none;"></div>
+        <input type="email" id="loginEmail" placeholder="Email" autocomplete="username">
+        <input type="password" id="loginPass" placeholder="Пароль" autocomplete="current-password">
+        <div class="modal-actions">
+          <button class="ghost-btn" id="modalCancel">Скасувати</button>
+          <button class="btn-primary" id="loginBtn">Увійти</button>
+        </div>
+      </div>`;
+    document.body.appendChild(backdrop);
+    backdrop.querySelector('#modalCancel').addEventListener('click', ()=> backdrop.remove());
+    backdrop.addEventListener('click', (e)=>{ if(e.target===backdrop) backdrop.remove(); });
+    const doLogin = ()=>{
+      const email = document.getElementById('loginEmail').value.trim();
+      const pass = document.getElementById('loginPass').value;
+      if(!email || !pass) return;
+      auth.signInWithEmailAndPassword(email, pass)
+        .then(()=> backdrop.remove())
+        .catch(err=>{
+          const box = document.getElementById('loginErrorBox');
+          box.textContent = translateAuthError(err);
+          box.style.display = 'block';
+        });
+    };
+    backdrop.querySelector('#loginBtn').addEventListener('click', doLogin);
+    backdrop.querySelector('#loginPass').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+    document.getElementById('loginEmail').focus();
   }
 
   /* ---------------- Schedule file parsing ---------------- */
@@ -334,7 +388,9 @@
     });
     html += `<div class="tab-sep"></div>`;
     html += `<button class="tab-btn${currentView==='summary'?' active':''}" data-view="summary">Зведення</button>`;
-    html += `<button class="upload-btn" id="uploadBtn">+ Завантажити тиждень</button>`;
+    if(canEdit()){
+      html += `<button class="upload-btn" id="uploadBtn">+ Завантажити тиждень</button>`;
+    }
     if(weeksIndex.length){
       html += `<button class="upload-btn" id="exportBtn" style="background:#2E4B3A;border-color:#3D6B52;">Експорт в Excel</button>`;
     }
@@ -344,7 +400,8 @@
       btn.addEventListener('click', ()=>{ currentView='week'; currentWeekKey = btn.dataset.week; renderAll(); });
     });
     toolbarEl.querySelector('[data-view="summary"]').addEventListener('click', ()=>{ currentView='summary'; renderAll(); });
-    document.getElementById('uploadBtn').addEventListener('click', ()=> fileInput.click());
+    const uploadBtn = document.getElementById('uploadBtn');
+    if(uploadBtn) uploadBtn.addEventListener('click', ()=> fileInput.click());
     const exportBtn = document.getElementById('exportBtn');
     if(exportBtn) exportBtn.addEventListener('click', showExportModal);
   }
@@ -354,10 +411,13 @@
     mainEl.innerHTML = `
       <div class="empty-state">
         <h2>Журнал поки порожній</h2>
-        <p>Завантаж Excel-файл розкладу на тиждень (той, що видає деканат) — журнал сам розбере дні, пари та предмети і додасть колонки для відміток.</p>
-        <button class="upload-btn" id="uploadBtn2" style="margin:0;">+ Завантажити перший тиждень</button>
+        <p>${canEdit()
+          ? 'Завантаж Excel-файл розкладу на тиждень (той, що видає деканат) — журнал сам розбере дні, пари та предмети і додасть колонки для відміток.'
+          : 'Редактор ще не завантажив жодного тижня розкладу.'}</p>
+        ${canEdit() ? '<button class="upload-btn" id="uploadBtn2" style="margin:0;">+ Завантажити перший тиждень</button>' : ''}
       </div>`;
-    document.getElementById('uploadBtn2').addEventListener('click', ()=> fileInput.click());
+    const btn = document.getElementById('uploadBtn2');
+    if(btn) btn.addEventListener('click', ()=> fileInput.click());
   }
 
   /* ---------------- Rendering: week view ---------------- */
@@ -373,7 +433,8 @@
     });
 
     const attendance = week.attendance || {};
-    const locked = !!week.closed;
+    const weekClosed = !!week.closed;
+    const locked = weekClosed || !canEdit(); // куратор бачить журнал завжди в режимі "лише перегляд"
 
     const ascArr = sortedWeeksAsc();
     const posIdx = ascArr.findIndex(w=>w.key===currentWeekKey);
@@ -392,7 +453,7 @@
           <span class="pair-num">${l.pair} пара</span>
           <span class="pair-time">${l.time}</span>
           <span class="pair-subj">${escapeHtml(l.code)} <span class="pair-type">${escapeHtml(l.type)}</span></span>
-          <button class="mark-all" data-lecture="${l.id}">усі присутні</button>
+          ${canEdit() ? `<button class="mark-all" data-lecture="${l.id}">усі присутні</button>` : ''}
         </th>`;
     });
 
@@ -431,11 +492,12 @@
         <div class="week-actions">
           <button class="ghost-btn" id="prevWeekBtn" ${hasPrev?'':'disabled'}>← попередній</button>
           <button class="ghost-btn" id="nextWeekBtn" ${hasNext?'':'disabled'}>наступний →</button>
-          <button class="ghost-btn" id="toggleCloseBtn">${locked?'активувати тиждень':'завершити тиждень'}</button>
-          <button class="ghost-btn danger" id="deleteWeekBtn">видалити тиждень</button>
+          ${canEdit() ? `<button class="ghost-btn" id="toggleCloseBtn">${weekClosed?'активувати тиждень':'завершити тиждень'}</button>` : ''}
+          ${canEdit() ? `<button class="ghost-btn danger" id="deleteWeekBtn">видалити тиждень</button>` : ''}
         </div>
       </div>
-      ${locked?'<div class="week-closed-banner">🔒 Тиждень завершено — відмітки заблоковано від редагування. Натисни «активувати тиждень», щоб знову їх редагувати.</div>':''}
+      ${weekClosed?'<div class="week-closed-banner">🔒 Тиждень завершено — відмітки заблоковано від редагування. Натисни «активувати тиждень», щоб знову їх редагувати.</div>':''}
+      ${(!weekClosed && !canEdit())?'<div class="week-closed-banner">👁 Режим перегляду — редагування відміток недоступне для цього акаунта.</div>':''}
       <div class="table-scroll">
         <table class="journal">
           <thead>
@@ -456,6 +518,7 @@
 
     mainEl.querySelectorAll('td.cell-attend').forEach(td=>{
       td.addEventListener('click', ()=>{
+        if(!canEdit()){ showToast('Цей акаунт має лише перегляд'); return; }
         if(locked){ showToast('Тиждень завершено — редагування вимкнено'); return; }
         const lectureId = td.dataset.lecture;
         const studentIdx = parseInt(td.dataset.student, 10);
@@ -490,8 +553,9 @@
       renderAll();
     });
 
-    document.getElementById('toggleCloseBtn').addEventListener('click', ()=>{
-      if(locked){
+    const toggleCloseBtn = document.getElementById('toggleCloseBtn');
+    if(toggleCloseBtn) toggleCloseBtn.addEventListener('click', ()=>{
+      if(weekClosed){
         setWeekClosed(currentWeekKey, false);
         showToast('Тиждень знову активний');
         renderAll();
@@ -509,7 +573,8 @@
       }
     });
 
-    document.getElementById('deleteWeekBtn').addEventListener('click', ()=>{
+    const deleteWeekBtn = document.getElementById('deleteWeekBtn');
+    if(deleteWeekBtn) deleteWeekBtn.addEventListener('click', ()=>{
       showModal({
         title: 'Видалити тиждень?',
         text: `Тиждень ${week.label} та всі відмітки в ньому буде видалено безповоротно на всіх пристроях.`,
@@ -759,6 +824,7 @@
     const file = e.target.files[0];
     fileInput.value = '';
     if(!file) return;
+    if(!canEdit()){ showToast('Цей акаунт має лише перегляд'); return; }
     try{
       const buf = await file.arrayBuffer();
       const text = decodeFile(buf);
@@ -817,7 +883,11 @@
     renderToolbar();
   }
 
-  /* ---------------- Init ---------------- */
+  /* ---------------- Init ----------------
+     Читання журналу публічне (за посиланням, без входу) — так куратор
+     і студенти можуть просто відкрити сторінку й побачити відвідуваність.
+     Вхід (кнопка "увійти" у шапці) потрібен лише щоб отримати право писати:
+     ставити відмітки, завантажувати/закривати/видаляти тижні. */
   if(!configIsFilled()){
     renderSetupNeeded();
   } else {
@@ -825,13 +895,23 @@
     auth = firebase.auth();
     db = firebase.database();
 
+    userRole = 'viewer';
+    renderAuthBadge();
+    startSync(); // дані видно одразу, ще до будь-якого входу
+
     auth.onAuthStateChanged(user=>{
       if(user){
-        renderSignedInBadge();
-        startSync();
+        db.ref(ROLES_PATH + '/' + user.uid).once('value')
+          .then(snap=>{ userRole = snap.val() === 'editor' ? 'editor' : 'viewer'; })
+          .catch(()=>{ userRole = 'viewer'; }) // якщо роль не вдалось прочитати — безпечніше вважати переглядом
+          .then(()=>{
+            renderAuthBadge();
+            renderAll();
+          });
       } else {
-        stopSync();
-        renderLogin();
+        userRole = 'viewer';
+        renderAuthBadge();
+        renderAll();
       }
     });
   }

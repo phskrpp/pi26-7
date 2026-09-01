@@ -80,6 +80,25 @@
     font-size:11.5px;
     color:#9DACC0;
   }
+  .role-tag{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:10.5px;
+    text-transform:uppercase;
+    letter-spacing:0.4px;
+    padding:3px 7px;
+    border-radius:var(--radius);
+    border:1px solid;
+  }
+  .role-tag.role-editor{
+    color:#BFE3CC;
+    border-color:#3D6B52;
+    background:rgba(61,107,82,0.25);
+  }
+  .role-tag.role-viewer{
+    color:#E3D3A8;
+    border-color:#8A6A21;
+    background:rgba(138,106,33,0.22);
+  }
   .masthead-actions .ghost-btn{
     background:transparent;
     border-color:#465268;
@@ -503,6 +522,19 @@
   }
   .modal h3{ font-family:'PT Serif',serif; margin:0 0 8px; font-size:16px; }
   .modal p{ color:var(--ink-soft); font-size:13px; margin:0 0 18px; }
+  .modal input[type=email], .modal input[type=password]{
+    width:100%;
+    box-sizing:border-box;
+    font-family:'PT Sans', sans-serif;
+    font-size:14px;
+    padding:10px 12px;
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    background:#fff;
+    color:var(--ink);
+    margin-bottom:10px;
+  }
+  .modal input[type=email]:focus, .modal input[type=password]:focus{ outline:2px solid var(--navy); outline-offset:-1px; }
   .modal-actions{ display:flex; justify-content:flex-end; gap:8px; }
   .modal.modal-wide{ max-width:440px; }
 
