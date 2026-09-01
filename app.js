@@ -132,17 +132,25 @@
   }
 
   function saveWeek(key, data){
+    if(!key){ showToast('Внутрішня помилка: порожній ключ тижня, збереження скасовано'); return; }
     weekCache[key] = data; // optimistic local update; the listener confirms it moments later
     if(!db) return;
-    db.ref(DB_PATH + '/' + key).set(data).catch(err=>{
+    // Пишемо через update({[key]: data}) на рівні DB_PATH, а не через
+    // конкатенацію рядка шляху (DB_PATH + '/' + key) — так навіть порожній
+    // або "дивний" key не може випадково перезаписати/зачепити весь журнал.
+    db.ref(DB_PATH).update({ [key]: data }).catch(err=>{
       showToast('Не вдалося зберегти: ' + err.message);
     });
   }
 
   function deleteWeekRemote(key){
+    if(!key){ showToast('Внутрішня помилка: порожній ключ тижня, видалення скасовано'); return; }
     delete weekCache[key];
     if(!db) return;
-    db.ref(DB_PATH + '/' + key).remove().catch(err=>{
+    // Так само: update({[key]: null}) видаляє РІВНО цей один дочірній вузол,
+    // без ризику, на відміну від db.ref(DB_PATH + '/' + key).remove(), де
+    // порожній key звів би шлях до самого DB_PATH і стер би весь журнал.
+    db.ref(DB_PATH).update({ [key]: null }).catch(err=>{
       showToast('Не вдалося видалити: ' + err.message);
     });
   }
@@ -422,7 +430,10 @@
 
   /* ---------------- Rendering: week view ---------------- */
   function renderWeek(){
-    const week = loadWeek(currentWeekKey);
+    const weekKey = currentWeekKey; // фіксуємо ключ саме цього рендеру — обробники нижче
+                                     // завжди діятимуть на нього, навіть якщо currentWeekKey
+                                     // згодом зміниться десь ще до кліку користувача
+    const week = loadWeek(weekKey);
     if(!week){ renderEmpty(); return; }
 
     const days = [];
@@ -437,7 +448,7 @@
     const locked = weekClosed || !canEdit(); // куратор бачить журнал завжди в режимі "лише перегляд"
 
     const ascArr = sortedWeeksAsc();
-    const posIdx = ascArr.findIndex(w=>w.key===currentWeekKey);
+    const posIdx = ascArr.findIndex(w=>w.key===weekKey);
     const hasPrev = posIdx > 0;
     const hasNext = posIdx >= 0 && posIdx < ascArr.length - 1;
 
@@ -525,7 +536,7 @@
         const markDiv = td.querySelector('.mark');
         const cur = parseInt((markDiv.className.match(/state-(\d)/)||[0,0])[1], 10);
         const next = nextState(cur);
-        setMark(currentWeekKey, lectureId, studentIdx, next);
+        setMark(weekKey, lectureId, studentIdx, next);
         renderWeek();
       });
     });
@@ -534,7 +545,7 @@
       btn.addEventListener('click', (e)=>{
         e.stopPropagation();
         if(locked){ showToast('Тиждень завершено — редагування вимкнено'); return; }
-        markAllPresent(currentWeekKey, btn.dataset.lecture);
+        markAllPresent(weekKey, btn.dataset.lecture);
         renderWeek();
       });
     });
@@ -556,7 +567,7 @@
     const toggleCloseBtn = document.getElementById('toggleCloseBtn');
     if(toggleCloseBtn) toggleCloseBtn.addEventListener('click', ()=>{
       if(weekClosed){
-        setWeekClosed(currentWeekKey, false);
+        setWeekClosed(weekKey, false);
         showToast('Тиждень знову активний');
         renderAll();
       } else {
@@ -565,7 +576,7 @@
           text: `Тиждень ${week.label} буде позначено завершеним, редагування відміток вимкнеться. Його завжди можна активувати знову.`,
           confirmLabel: 'Завершити',
           onConfirm: ()=>{
-            setWeekClosed(currentWeekKey, true);
+            setWeekClosed(weekKey, true);
             showToast('Тиждень завершено');
             renderAll();
           }
@@ -580,8 +591,8 @@
         text: `Тиждень ${week.label} та всі відмітки в ньому буде видалено безповоротно на всіх пристроях.`,
         confirmLabel: 'Видалити', danger:true,
         onConfirm: ()=>{
-          deleteWeekRemote(currentWeekKey);
-          weeksIndex = weeksIndex.filter(w=>w.key!==currentWeekKey);
+          deleteWeekRemote(weekKey);
+          weeksIndex = weeksIndex.filter(w=>w.key!==weekKey);
           currentWeekKey = weeksIndex.length ? weeksIndex[0].key : null;
           renderAll();
         }
