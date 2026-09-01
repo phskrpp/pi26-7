@@ -68,13 +68,13 @@
         може лише той, хто увійшов через акаунт з кроку 4.
   */
   const firebaseConfig = {
-    apiKey: "ВСТАВ_СЮДИ",
-    authDomain: "ВСТАВ_СЮДИ",
-    databaseURL: "ВСТАВ_СЮДИ",
-    projectId: "ВСТАВ_СЮДИ",
-    storageBucket: "ВСТАВ_СЮДИ",
-    messagingSenderId: "ВСТАВ_СЮДИ",
-    appId: "ВСТАВ_СЮДИ"
+    apiKey: "AIzaSyAqj1dBvByK6Vwnz0nEaHyHVyKY8h1pIvU",
+    authDomain: "pi26-7.firebaseapp.com",
+    databaseURL: "https://pi26-7-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId: "pi26-7",
+    storageBucket: "pi26-7.firebasestorage.app",
+    messagingSenderId: "788681929939",
+    appId: "1:788681929939:web:14eab5dadaed91d4cb9026"
   };
   const DB_PATH = 'journal_pi267';
 
